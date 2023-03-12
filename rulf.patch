@@ -1,0 +1,756 @@
+diff --git a/src/librustdoc/fuzz_target/afl_util.rs b/src/librustdoc/fuzz_target/afl_util.rs
+index 0b32cef4966..455c4c894df 100644
+--- a/src/librustdoc/fuzz_target/afl_util.rs
++++ b/src/librustdoc/fuzz_target/afl_util.rs
+@@ -1,6 +1,12 @@
+ use crate::clean::PrimitiveType;
+ use crate::fuzz_target::fuzzable_type::FuzzableType;
++use std::collections::{HashMap, HashSet};
++use crate::fuzz_target::prelude_type::_PreludeHelper;
++use crate::fuzz_target::api_graph::{ApiGraph};
++use crate::fuzz_target::api_sequence::{ApiCall, ApiSequence};
+ use rustc_data_structures::fx::FxHashSet;
++//use crate::fuzz_target::afl_util::GraphNode::{EndNode, LeftNode, MidLeftNode, MidRightNode};
++
+ #[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+ pub enum _AflHelpers {
+     _NoHelper,
+@@ -387,6 +393,320 @@ impl _AflHelpers {
+     }
+ }
+ 
++pub fn _to_combined_afl_replay_file(api_graph: &ApiGraph, chosen_sequences: Vec<ApiSequence>) -> String {
++    let mut res = _to_combined_afl_except_main(api_graph, &chosen_sequences);
++    res.push_str(_combined_afl_main_replay_function(api_graph, &chosen_sequences).as_str());
++    res
++}
++
++pub fn _to_combined_afl_test_file(api_graph: &ApiGraph, chosen_sequences: Vec<ApiSequence>) -> String {
++    let mut res = _to_combined_afl_except_main(api_graph, &chosen_sequences);
++    res.push_str(_combined_afl_main_function(api_graph, &chosen_sequences).as_str());
++    res
++}
++
++pub fn _to_combined_afl_except_main(api_graph: &ApiGraph, chosen_sequences: &Vec<ApiSequence>) -> String {
++    let mut res = String::new();
++
++    //feature gate
++    add_features_lines(&mut res, chosen_sequences);
++
++    res.push_str("#[macro_use]\n");
++    res.push_str("extern crate afl;\n");
++    res.push_str(format!("extern crate {};\n", api_graph._crate_name).as_str());
++
++    add_prelude_helper(&mut res, chosen_sequences);
++
++    add_afl_helper_functions(&mut res, chosen_sequences);
++
++    add_traits(&mut res, chosen_sequences);
++
++    add_well_written_functions(&mut res, chosen_sequences, api_graph);
++    res
++}
++
++fn add_well_written_functions(res: &mut String, chosen_sequences: &Vec<ApiSequence>, api_graph: &ApiGraph) {
++    let mut sequence_count = 0;
++    for sequence in chosen_sequences {
++        res.push_str(sequence._to_well_written_function(api_graph, sequence_count, 0).as_str());
++        res.push('\n');
++        sequence_count = sequence_count + 1;
++    }
++}
++
++fn add_traits(res: &mut String, chosen_sequences: &Vec<ApiSequence>) {
++    let mut using_traits = Vec::new();
++    for sequence in chosen_sequences {
++        using_traits.push(sequence._generate_using_traits_string(0));
++    }
++    using_traits.sort();
++    using_traits.dedup();
++    for _trait in using_traits {
++        res.push_str(_trait.as_str());
++    }
++}
++
++fn add_afl_helper_functions(res: &mut String, chosen_sequences: &Vec<ApiSequence>) {
++    let mut afl_helper_functions = Vec::new();
++    for sequence in chosen_sequences {
++        afl_helper_functions.append(&mut _get_afl_helper_functions_vec_of_sequence(&sequence.fuzzable_params));
++    }
++    afl_helper_functions.sort();
++    afl_helper_functions.dedup();
++    if let Some(afl_functions) = _return_string_from_option_vec(_return_vec_options(afl_helper_functions)) {
++        res.push_str(afl_functions.as_str());
++    }
++}
++
++fn add_prelude_helper(res: &mut String, chosen_sequences: &Vec<ApiSequence>) {
++    let mut prelude_helper_set = HashSet::new();
++    for sequence in chosen_sequences {
++        prelude_helper_set.extend(sequence._prelude_helpers());
++    }
++
++    if let Some(prelude_functions) = _prelude_helper_functions_str(prelude_helper_set) {
++        res.push_str(prelude_functions.as_str());
++    }
++}
++
++fn add_features_lines(res: &mut String, chosen_sequences: &Vec<ApiSequence>) {
++    let mut features = Vec::new();
++    for sequence in chosen_sequences {
++        features.append(&mut _get_features_of_sequence(&sequence.fuzzable_params))
++    }
++    features.sort();
++    features.dedup();
++
++    if !features.is_empty() {
++        let feature_gates = Some(features);
++        for feature_gate in &feature_gates.unwrap() {
++            let feature_gate_line = format!("{feature_gate}\n", feature_gate = feature_gate);
++            res.push_str(feature_gate_line.as_str());
++        }
++    }
++}
++
++pub fn _push_with_indent(res: &mut String, indent: &String, line: &str) {
++    res.push_str(indent.as_str());
++    res.push_str(line);
++}
++/*
++enum GraphNode {
++    EndNode(usize),
++    MidRightNode(HashMap<String, usize>),
++    MidLeftNode(HashMap<String,HashMap<String,usize>>),
++    LeftNode(HashMap<String,HashMap<String,HashMap<String,usize>>>)
++}
++
++pub fn _pus_match_statement(res: &mut String, outer_indent: String, decision_count: usize, graph: &GraphNode, chosen_sequences: &Vec<ApiSequence>) {
++    let mut indent = outer_indent.clone();
++    let mut switch_count = 0;
++    match graph {
++        EndNode(graph) => {
++            res.push_str(
++                _afl_matched_closure_body(
++                    indent.clone(),
++                    &chosen_sequences[*graph],
++                    *graph,
++                    switch_count,
++                ).as_str()
++            );
++        }
++        MidLeftNode(graph) | MidRightNode(graph) | LeftNode(graph) => {
++            _push_with_indent(res, &indent, format!("match decision{} % {} {{\n", decision_count, graph.keys().len()).as_str());
++            indent = _generate_indent(indent.len() + 4);
++            for (_key, value) in graph.iter() {
++                _pus_match_statement(res, indent.clone(), decision_count + 1, GraphNode(graph), chosen_sequences);
++                switch_count += 1;
++            }
++        }
++    }
++    _push_with_indent(res, &indent, "_ => { }\n");
++    indent = _generate_indent(indent.len() - 4);
++    _push_with_indent(res, &indent, "}\n");
++}
++*/
++
++
++pub fn _combined_afl_main_replay_function(api_graph: &ApiGraph, chosen_sequences: &Vec<ApiSequence>) -> String {
++    let mut res = String::new();
++    let mut indent = _generate_indent(4);
++
++    res.push_str("fn main() {\n");
++    res.push_str(combined_main_decision_body(api_graph, &chosen_sequences, &mut indent).as_str());
++    res.push_str("}\n");
++    res
++}
++
++pub fn _combined_afl_main_function(api_graph: &ApiGraph, chosen_sequences: &Vec<ApiSequence>) -> String {
++    let mut res = String::new();
++    let mut indent = _generate_indent(4);
++    res.push_str("fn main() {\n");
++    _push_with_indent(&mut res, &indent, "fuzz!(|input: &[u8]| {\n");
++    indent = _generate_indent(indent.len() + 4);
++
++
++    res.push_str(combined_main_decision_body(api_graph, &chosen_sequences, &mut indent).as_str());
++
++    indent = _generate_indent(indent.len() - 4);
++    _push_with_indent(&mut res, &indent, "});\n");
++
++    indent = _generate_indent(indent.len() - 4);
++    _push_with_indent(&mut res, &indent, "}\n");
++
++
++    res
++}
++
++fn combined_main_decision_body(api_graph: &ApiGraph, chosen_sequences: &&Vec<ApiSequence>, outer_indent: &mut String) -> String {
++    let mut res = String::new();
++    let mut indent = outer_indent.clone();
++
++    _push_with_indent(&mut res, &indent, "if input.len() < 2 { return; }\n");
++
++    _push_with_indent(&mut res, &indent, "let decision1 = u8::from_be_bytes([input[0]]) % 8;\n");
++    _push_with_indent(&mut res, &indent, "let decision2 = u8::from_be_bytes([input[0]]) / 8 % 8;\n");
++    _push_with_indent(&mut res, &indent, "let decision3 = u8::from_be_bytes([input[0]]) / 8 / 8 % 8;\n");
++    _push_with_indent(&mut res, &indent, "let data = &input[1..input.len()];\n");
++
++
++    let graph = sequence_graph(api_graph, chosen_sequences);
++    let mut sq_cnt0 = 0;
++    _push_with_indent(&mut res, &indent, format!("match decision1 % {} {{\n", graph.keys().len()).as_str());
++    indent = _generate_indent(indent.len() + 4);
++    for (_, v1) in graph.iter() {
++        _push_with_indent(&mut res, &indent, &*format!("{} => {{\n", sq_cnt0));
++        indent = _generate_indent(indent.len() + 4);
++
++        let mut sq_cnt1 = 0;
++        _push_with_indent(&mut res, &indent, format!("match decision2 % {} {{\n", v1.keys().len()).as_str());
++        indent = _generate_indent(indent.len() + 4);
++
++        for (_, v2) in v1 {
++            _push_with_indent(&mut res, &indent, &*format!("{} => {{\n", sq_cnt1));
++            indent = _generate_indent(indent.len() + 4);
++
++            let mut sq_cnt2 = 0;
++            _push_with_indent(&mut res, &indent, format!("match decision3 % {} {{\n", v2.len()).as_str());
++            indent = _generate_indent(indent.len() + 4);
++            for idx in v2.iter() {
++                res.push_str(_afl_matched_closure_body(indent.clone(), &chosen_sequences[*idx], *idx, sq_cnt2).as_str());
++                sq_cnt2 += 1;
++            }
++
++            _push_with_indent(&mut res, &indent, "_ => { }\n");
++            indent = _generate_indent(indent.len() - 4);
++            _push_with_indent(&mut res, &indent, "}\n");
++            sq_cnt1 += 1;
++
++            indent = _generate_indent(indent.len() - 4);
++            _push_with_indent(&mut res, &indent, "}\n");
++        }
++
++        _push_with_indent(&mut res, &indent, "_ => { }\n");
++        indent = _generate_indent(indent.len() - 4);
++        _push_with_indent(&mut res, &indent, "}\n");
++        sq_cnt0 += 1;
++
++        indent = _generate_indent(indent.len() - 4);
++        _push_with_indent(&mut res, &indent, "}\n");
++    }
++
++    _push_with_indent(&mut res, &indent, "_ => { }\n");
++    indent = _generate_indent(indent.len() - 4);
++    _push_with_indent(&mut res, &indent, "}\n");
++    res
++}
++
++pub fn _afl_matched_closure_body(indent: String, sequence: &ApiSequence, test_index: usize, match_value: i32) -> String {
++    let mut res = String::new();
++    _push_with_indent(&mut res, &indent, format!("{} => {{", match_value.to_string()).as_str());
++    res.push_str(_afl_combined_closure_body(sequence, indent.len() + 4, test_index).as_str());
++    _push_with_indent(&mut res, &indent, "}\n");
++    res
++}
++
++pub fn _afl_combined_closure_body(sequence: &ApiSequence, outer_indent: usize, test_index: usize) -> String {
++    let extra_indent = 4;
++    let mut res = String::new();
++    let indent = _generate_indent(outer_indent + extra_indent);
++    res.push_str(format!("{indent}//actual body emit\n", indent = indent).as_str());
++
++    let op = if sequence._is_fuzzables_fixed_length() { "!=" } else { "<" };
++    let min_len = sequence._fuzzables_min_length();
++    res.push_str(
++        format!(
++            "{indent}if data.len() {op} {min_len} {{return;}}\n\n",
++            indent = indent,
++            op = op,
++            min_len = min_len
++        )
++            .as_str(),
++    );
++
++    let dynamic_param_start_index = sequence._fuzzable_fixed_part_length();
++    let dynamic_param_number = sequence._dynamic_length_param_number();
++    let dynamic_length_name = "dynamic_length";
++    let every_dynamic_length = format!(
++        "let {dynamic_length_name} = (data.len() - {dynamic_param_start_index}) / {dynamic_param_number}",
++        dynamic_length_name = dynamic_length_name,
++        dynamic_param_start_index = dynamic_param_start_index,
++        dynamic_param_number = dynamic_param_number
++    );
++    if !sequence._is_fuzzables_fixed_length() {
++        res.push_str(
++            format!(
++                "{indent}{every_dynamic_length};\n",
++                indent = indent,
++                every_dynamic_length = every_dynamic_length
++            )
++                .as_str(),
++        );
++    }
++
++    let mut fixed_start_index = 0; //当前固定长度的变量开始分配的位置
++    let mut dynamic_param_index = 0; //当前这是第几个动态长度的变量
++
++    let fuzzable_param_number = sequence.fuzzable_params.len();
++    for i in 0..fuzzable_param_number {
++        let fuzzable_param = &sequence.fuzzable_params[i];
++        let afl_helper = _AflHelpers::_new_from_fuzzable(fuzzable_param);
++        let param_initial_line = afl_helper._generate_param_initial_statement(
++            i,
++            fixed_start_index,
++            dynamic_param_start_index,
++            dynamic_param_index,
++            dynamic_param_number,
++            &dynamic_length_name.to_string(),
++            fuzzable_param,
++        );
++        res.push_str(
++            format!(
++                "{indent}{param_initial_line}\n",
++                indent = indent,
++                param_initial_line = param_initial_line
++            )
++                .as_str(),
++        );
++        fixed_start_index = fixed_start_index + fuzzable_param._fixed_part_length();
++        dynamic_param_index =
++            dynamic_param_index + fuzzable_param._dynamic_length_param_number();
++    }
++
++    let mut test_function_call =
++        format!("{indent}test_function{test_index}(", indent = indent, test_index = test_index);
++    for i in 0..fuzzable_param_number {
++        if i != 0 {
++            test_function_call.push_str(" ,");
++        }
++        test_function_call.push_str(format!("_param{}", i).as_str());
++    }
++    test_function_call.push_str(");\n");
++    res.push_str(test_function_call.as_str());
++
++    res
++}
++
+ //使用FxHashset去重
+ pub fn _get_all_dependent_afl_helpers_of_sequence(
+     fuzzable_params: &Vec<FuzzableType>,
+@@ -402,13 +722,12 @@ pub fn _get_all_dependent_afl_helpers_of_sequence(
+     res
+ }
+ 
+-//获得所有的函数的定义，对于slice的话，由于采用了范型，只需要加入一次
+-pub fn _get_afl_helpers_functions_of_sequence(
++pub fn _get_afl_helper_functions_vec_of_sequence(
+     fuzzable_params: &Vec<FuzzableType>,
+-) -> Option<Vec<String>> {
++) -> Vec<String> {
+     let afl_helpers = _get_all_dependent_afl_helpers_of_sequence(fuzzable_params);
+     if afl_helpers.len() < 1 {
+-        return None;
++        return Vec::new();
+     }
+     let mut afl_helper_functions = Vec::new();
+ 
+@@ -421,11 +740,35 @@ pub fn _get_afl_helpers_functions_of_sequence(
+         }
+         afl_helper_functions.push(afl_helper._to_full_function().to_string())
+     }
+-    Some(afl_helper_functions)
++    afl_helper_functions
+ }
+ 
+-//获得可能的feature gate,
+-pub fn _get_feature_gates_of_sequence(fuzzable_params: &Vec<FuzzableType>) -> Option<Vec<String>> {
++pub fn _return_vec_options(v: Vec<String>) -> Option<Vec<String>> {
++    if v.is_empty() { None } else { Some(v) }
++}
++
++pub fn _return_string_from_option_vec(ov: Option<Vec<String>>) -> Option<String> {
++    match ov {
++        None => None,
++        Some(v) => {
++            let mut res = String::new();
++            for elem in &v {
++                res.push_str(format!("{}\n", elem).as_str());
++            }
++            Some(res)
++        }
++    }
++}
++
++//获得所有的函数的定义，对于slice的话，由于采用了范型，只需要加入一次
++pub fn _get_afl_helpers_functions_of_sequence(
++    fuzzable_params: &Vec<FuzzableType>,
++) -> Option<Vec<String>> {
++    let afl_helper_functions_vec = _get_afl_helper_functions_vec_of_sequence(fuzzable_params);
++    _return_vec_options(afl_helper_functions_vec)
++}
++
++pub fn _get_features_of_sequence(fuzzable_params: &Vec<FuzzableType>) -> Vec<String> {
+     let all_afl_helpers = _get_all_dependent_afl_helpers_of_sequence(fuzzable_params);
+     let mut feature_gates = FxHashSet::default();
+     for afl_helper in all_afl_helpers {
+@@ -436,15 +779,78 @@ pub fn _get_feature_gates_of_sequence(fuzzable_params: &Vec<FuzzableType>) -> Op
+         }
+     }
+     if feature_gates.len() < 1 {
+-        return None;
++        return Vec::new();
+     }
+     let mut features = Vec::new();
+     for feature_gate in feature_gates {
+         features.push(feature_gate);
+     }
++    features
++}
++
++pub fn _prelude_helper_functions_str(prelude_helpers: HashSet<_PreludeHelper>) -> Option<String> {
++    if prelude_helpers.len() == 0 {
++        return None;
++    }
++    let mut res = String::new();
++    for helper in prelude_helpers {
++        res.push_str(helper._to_helper_function());
++        res.push('\n');
++    }
++    Some(res)
++}
++
++//获得可能的feature gate,
++pub fn _get_feature_gates_of_sequence(fuzzable_params: &Vec<FuzzableType>) -> Option<Vec<String>> {
++    let features = _get_features_of_sequence(fuzzable_params);
++    if features.is_empty() {
++        return None;
++    }
+     Some(features)
+ }
+ 
++pub fn sequence_graph(api_graph: &ApiGraph, chosen_sequences: &Vec<ApiSequence>) -> HashMap<String, HashMap<String, HashSet<usize>>> {
++    let mut graph = HashMap::new();
++    let mut sequence_index = 0;
++    for sequence in chosen_sequences {
++        let functions = &sequence.functions;
++        let mut function_names = Vec::new();
++
++        if functions.len() < 3 {
++            for _i in 0..(3 - functions.len()) {
++                function_names.push("_".parse().unwrap());
++            }
++        }
++        function_names.append(&mut functions.iter().map(|function| get_function_name(api_graph, function)).collect::<Vec<String>>());
++        if !graph.contains_key(&function_names[0]) {
++            graph.insert(function_names[0].clone(), HashMap::new());
++        }
++        if function_names.len() > 1 && !graph.get_mut(function_names[0].clone().as_str()).unwrap().contains_key(&function_names[1]) {
++            graph.get_mut(function_names[0].clone().as_str()).unwrap().insert(function_names[1].clone(), HashSet::new());
++        }
++        if function_names.len() > 2 && !graph.get_mut(function_names[0].clone().as_str()).unwrap().get_mut(function_names[1].clone().as_str()).unwrap().contains(&sequence_index) {
++            graph.get_mut(function_names[0].clone().as_str()).unwrap().get_mut(function_names[1].clone().as_str()).unwrap().insert(sequence_index.clone());
++        }
++        sequence_index = sequence_index + 1;
++    }
++    graph
++}
++
++pub fn get_function_name(api_graph: &ApiGraph, api_call: &ApiCall) -> String {
++    let api_function_index = api_call.func.1;
++    let api_function = &api_graph.api_functions[api_function_index];
++    let function_name = api_function.full_name.clone();
++    function_name
++}
++
++pub fn _generate_indent(indent_size: usize) -> String {
++    let mut indent = String::new();
++    for _ in 0..indent_size {
++        indent.push(' ');
++    }
++    indent
++}
++
+ pub fn _data_to_u8() -> &'static str {
+     "fn _to_u8(data:&[u8], index:usize)->u8 {
+     data[index]
+diff --git a/src/librustdoc/fuzz_target/api_sequence.rs b/src/librustdoc/fuzz_target/api_sequence.rs
+index c568b6bb894..0fc06a11e5b 100644
+--- a/src/librustdoc/fuzz_target/api_sequence.rs
++++ b/src/librustdoc/fuzz_target/api_sequence.rs
+@@ -6,6 +6,7 @@ use crate::fuzz_target::fuzzable_type::FuzzableType;
+ use crate::fuzz_target::prelude_type;
+ use crate::fuzz_target::replay_util;
+ use std::collections::{HashMap, HashSet};
++use crate::fuzz_target::prelude_type::_PreludeHelper;
+ 
+ #[derive(Clone, Debug, Hash, Eq, PartialEq)]
+ pub enum ParamType {
+@@ -385,12 +386,14 @@ impl ApiSequence {
+         if let Some(afl_functions) = afl_helper_functions {
+             res.push_str(afl_functions.as_str());
+         }
++        let using_traits = self._generate_using_traits_string(0);
++        res.push_str(using_traits.as_str());
+         res.push_str(self._to_well_written_function(_api_graph, test_index, 0).as_str());
+         res.push('\n');
+         res
+     }
+ 
+-    pub fn _prelude_helper_functions(&self) -> Option<String> {
++    pub fn _prelude_helpers(&self) -> HashSet<_PreludeHelper>{
+         let mut prelude_helpers = HashSet::new();
+         for api_call in &self.functions {
+             let params = &api_call.params;
+@@ -401,35 +404,21 @@ impl ApiSequence {
+                 }
+             }
+         }
+-        if prelude_helpers.len() == 0 {
+-            return None;
+-        }
+-        let mut res = String::new();
+-        for helper in prelude_helpers {
+-            res.push_str(helper._to_helper_function());
+-            res.push('\n');
+-        }
+-        Some(res)
++        prelude_helpers
++    }
++
++    pub fn _prelude_helper_functions(&self) -> Option<String> {
++        let prelude_helpers = self._prelude_helpers();
++        afl_util::_prelude_helper_functions_str(prelude_helpers)
+     }
+ 
+     pub fn _afl_helper_functions(&self) -> Option<String> {
+-        let afl_helper_functions =
+-            afl_util::_get_afl_helpers_functions_of_sequence(&self.fuzzable_params);
+-        match afl_helper_functions {
+-            None => None,
+-            Some(afl_helpers) => {
+-                let mut res = String::new();
+-                for afl_helper in &afl_helpers {
+-                    res.push_str(format!("{}\n", afl_helper).as_str());
+-                }
+-                Some(res)
+-            }
+-        }
++        afl_util::_return_string_from_option_vec( afl_util::_get_afl_helpers_functions_of_sequence(&self.fuzzable_params) )
+     }
+ 
+     pub fn _afl_main_function(&self, test_index: usize) -> String {
+         let mut res = String::new();
+-        let indent = _generate_indent(4);
++        let indent = afl_util::_generate_indent(4);
+         res.push_str("fn main() {\n");
+         res.push_str(indent.as_str());
+         res.push_str("fuzz!(|data: &[u8]| {\n");
+@@ -456,7 +445,7 @@ impl ApiSequence {
+     pub fn _afl_closure_body(&self, outer_indent: usize, test_index: usize) -> String {
+         let extra_indent = 4;
+         let mut res = String::new();
+-        let indent = _generate_indent(outer_indent + extra_indent);
++        let indent = afl_util::_generate_indent(outer_indent + extra_indent);
+         res.push_str(format!("{indent}//actual body emit\n", indent = indent).as_str());
+ 
+         let op = if self._is_fuzzables_fixed_length() { "!=" } else { "<" };
+@@ -545,8 +534,7 @@ impl ApiSequence {
+         let local_param_prefix = "_local";
+         let mut res = String::new();
+         //生成对trait的引用
+-        let using_traits = self._generate_using_traits_string(indent_size);
+-        res.push_str(using_traits.as_str());
++
+         //生成函数头
+         let function_header = self._generate_function_header_string(
+             _api_graph,
+@@ -563,7 +551,7 @@ impl ApiSequence {
+ 
+         //加入函数体
+         if self._unsafe_tag {
+-            let unsafe_indent = _generate_indent(indent_size + 4);
++            let unsafe_indent = afl_util::_generate_indent(indent_size + 4);
+             res.push_str(unsafe_indent.as_str());
+             res.push_str("unsafe {\n");
+             let unsafe_function_body = self._generate_function_body_string(
+@@ -586,7 +574,7 @@ impl ApiSequence {
+         }
+ 
+         //加入函数体结尾的大括号
+-        let braket_indent = _generate_indent(indent_size);
++        let braket_indent = afl_util::_generate_indent(indent_size);
+         res.push_str(braket_indent.as_str());
+         res.push_str("}\n");
+ 
+@@ -594,7 +582,7 @@ impl ApiSequence {
+     }
+ 
+     pub fn _generate_using_traits_string(&self, indent_size: usize) -> String {
+-        let indent = _generate_indent(indent_size);
++        let indent = afl_util::_generate_indent(indent_size);
+         let mut res = String::new();
+         //using trait需要去重
+         let mut has_used_traits = HashSet::new();
+@@ -625,7 +613,7 @@ impl ApiSequence {
+         param_prefix: &str,
+     ) -> String {
+         let indent_size = outer_indent + extra_indent;
+-        let indent = _generate_indent(indent_size);
++        let indent = afl_util::_generate_indent(indent_size);
+ 
+         //生成具体的函数签名
+         let mut res = String::new();
+@@ -672,7 +660,7 @@ impl ApiSequence {
+     ) -> String {
+         let extra_indent = 4;
+         let mut res = String::new();
+-        let body_indent = _generate_indent(outer_indent + extra_indent);
++        let body_indent = afl_util::_generate_indent(outer_indent + extra_indent);
+ 
+         let dead_code = self._dead_code(_api_graph);
+ 
+@@ -777,10 +765,3 @@ impl ApiSequence {
+     }
+ }
+ 
+-pub fn _generate_indent(indent_size: usize) -> String {
+-    let mut indent = String::new();
+-    for _ in 0..indent_size {
+-        indent.push(' ');
+-    }
+-    indent
+-}
+diff --git a/src/librustdoc/fuzz_target/file_util.rs b/src/librustdoc/fuzz_target/file_util.rs
+index e449252c34e..2b8e25d2261 100644
+--- a/src/librustdoc/fuzz_target/file_util.rs
++++ b/src/librustdoc/fuzz_target/file_util.rs
+@@ -1,4 +1,5 @@
+ use crate::fuzz_target::api_graph::ApiGraph;
++use crate::fuzz_target::afl_util;
+ use std::collections::HashMap;
+ use std::fs;
+ use std::io::Write;
+@@ -7,30 +8,30 @@ use std::path::PathBuf;
+ lazy_static! {
+     static ref CRATE_TEST_DIR: HashMap<&'static str, &'static str> = {
+         let mut m = HashMap::new();
+-        m.insert("url", "/home/jjf/afl_fast_work/url_afl_work");
+-        m.insert("regex_syntax", "/home/jjf/afl_fast_work/regex-syntax-afl-work");
+-        m.insert("semver_parser", "/home/jjf/afl_fast_work/semver-parser-afl-work");
+-        m.insert("bat", "/home/jjf/afl_fast_work/bat-afl-work");
+-        m.insert("xi_core_lib", "/home/jjf/afl_fast_work/xi-core-lib-afl-work");
+-        m.insert("proc_macro2", "/home/jjf/afl_fast_work/proc-macro2-afl-work");
+-        m.insert("clap", "/home/jjf/afl_fast_work/clap-afl-work");
+-        m.insert("regex", "/home/jjf/afl_fast_work/regex-afl-work");
+-        m.insert("serde_json", "/home/jjf/afl_fast_work/serde-json-afl-work");
+-        m.insert("tui", "/home/jjf/afl_fast_work/tui-afl-work");
+-        m.insert("semver", "/home/jjf/afl_fast_work/semver-afl-work");
+-        m.insert("http", "/home/jjf/afl_fast_work/http-afl-work");
+-        m.insert("flate2", "/home/jjf/afl_fast_work/flate2-afl-work");
+-        m.insert("time", "/home/jjf/afl_fast_work/time-afl-work");
++        m.insert("url", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/url_afl_work");
++        m.insert("regex_syntax", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/regex-syntax-afl-work");
++        m.insert("semver_parser", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/semver-parser-afl-work");
++        m.insert("bat", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/bat-afl-work");
++        m.insert("xi_core_lib", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/xi-core-lib-afl-work");
++        m.insert("proc_macro2", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/proc-macro2-afl-work");
++        m.insert("clap", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/clap-afl-work");
++        m.insert("regex", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/regex-afl-work");
++        m.insert("serde_json", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/serde-json-afl-work");
++        m.insert("tui", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/tui-afl-work");
++        m.insert("semver", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/semver-afl-work");
++        m.insert("http", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/http-afl-work");
++        m.insert("flate2", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/flate2-afl-work");
++        m.insert("time", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/afl_fast_work/time-afl-work");
+ 
+         //fudge-like-directories
+-        m.insert("fudge_like_url", "/home/jjf/fudge_like_work/url-work");
+-        m.insert("fudge_like_regex", "/home/jjf/fudge_like_work/regex-work");
+-        m.insert("fudge_like_time", "/home/jjf/fudge_like_work/time-work");
++        m.insert("fudge_like_url", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/fudge_like_work/url-work");
++        m.insert("fudge_like_regex", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/fudge_like_work/regex-work");
++        m.insert("fudge_like_time", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/fudge_like_work/time-work");
+ 
+         //fudge-directories
+-        m.insert("fudge_regex", "/home/jjf/fudge_work/regex-work");
+-        m.insert("fudge_url", "/home/jjf/fudge_work/url-work");
+-        m.insert("fudge_time", "/home/jjf/fudge_work/time-work");
++        m.insert("fudge_regex", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/fudge_work/regex-work");
++        m.insert("fudge_url", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/fudge_work/url-work");
++        m.insert("fudge_time", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/fudge_work/time-work");
+         m
+     };
+ }
+@@ -38,9 +39,9 @@ lazy_static! {
+ lazy_static! {
+     static ref RANDOM_TEST_DIR: HashMap<&'static str, &'static str> = {
+         let mut m = HashMap::new();
+-        m.insert("regex", "/home/jjf/random_work/regex-work");
+-        m.insert("url", "/home/jjf/random_work/url-work");
+-        m.insert("time", "/home/jjf/random_work/time-work");
++        m.insert("regex", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/random_work/regex-work");
++        m.insert("url", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/random_work/url-work");
++        m.insert("time", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/random_work/time-work");
+         m
+     };
+ }
+@@ -48,10 +49,10 @@ lazy_static! {
+ lazy_static! {
+     static ref LIBFUZZER_FUZZ_TARGET_DIR: HashMap<&'static str, &'static str> = {
+         let mut m = HashMap::new();
+-        m.insert("url", "/home/jjf/libfuzzer_work/url-libfuzzer-targets");
+-        m.insert("regex_syntax", "/home/jjf/libfuzzer_work/regex-syntax-libfuzzer-targets");
+-        m.insert("syn", "/home/jjf/libfuzzer_work/syn-libfuzzer-targets");
+-        m.insert("semver_parser", "/home/jjf/libfuzzer_work/sem-libfuzzer-targets");
++        m.insert("url", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/libfuzzer_work/url-libfuzzer-targets");
++        m.insert("regex_syntax", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/libfuzzer_work/regex-syntax-libfuzzer-targets");
++        m.insert("syn", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/libfuzzer_work/syn-libfuzzer-targets");
++        m.insert("semver_parser", "/home/sasone/smart-mutations-for-library-fuzzing/Rulf/libfuzzer_work/sem-libfuzzer-targets");
+         m
+     };
+ }
+@@ -105,14 +106,14 @@ impl FileHelper {
+     pub fn new(api_graph: &ApiGraph, random_strategy: bool) -> Self {
+         let crate_name = api_graph._crate_name.clone();
+         let test_dir = if !random_strategy {
+-            CRATE_TEST_DIR.get(crate_name.as_str()).unwrap().to_string()
++            CRATE_TEST_DIR.get( crate_name.as_str()).unwrap().to_string()
+         } else {
+             RANDOM_TEST_DIR.get(crate_name.as_str()).unwrap().to_string()
+         };
+-        let mut sequence_count = 0;
++        //let mut sequence_count = 0;
+         let mut test_files = Vec::new();
+         let mut reproduce_files = Vec::new();
+-        let mut libfuzzer_files = Vec::new();
++        let libfuzzer_files = Vec::new();
+         //let chosen_sequences = api_graph._naive_choose_sequence(MAX_TEST_FILE_NUMBER);
+         let chosen_sequences = if !random_strategy {
+             api_graph._heuristic_choose(MAX_TEST_FILE_NUMBER, true)
+@@ -126,18 +127,21 @@ impl FileHelper {
+         };
+         //println!("chosen sequences number: {}", chosen_sequences.len());
+ 
+-        for sequence in &chosen_sequences {
++        /*for sequence in &chosen_sequences {
+             if sequence_count >= MAX_TEST_FILE_NUMBER {
+                 break;
+             }
+             let test_file = sequence._to_afl_test_file(api_graph, sequence_count);
+             test_files.push(test_file);
+-            let reproduce_file = sequence._to_replay_crash_file(api_graph, sequence_count);
+-            reproduce_files.push(reproduce_file);
+-            let libfuzzer_file = sequence._to_libfuzzer_test_file(api_graph, sequence_count);
+-            libfuzzer_files.push(libfuzzer_file);
++            // let reproduce_file = sequence._to_replay_crash_file(api_graph, sequence_count);
++            // reproduce_files.push(reproduce_file);
++            // let libfuzzer_file = sequence._to_libfuzzer_test_file(api_graph, sequence_count);
++            // libfuzzer_files.push(libfuzzer_file);
+             sequence_count = sequence_count + 1;
+-        }
++        }*/
++        test_files.push(afl_util::_to_combined_afl_test_file(api_graph, chosen_sequences.clone()));
++        reproduce_files.push(afl_util::_to_combined_afl_replay_file(api_graph, chosen_sequences.clone()));
++        //libfuzzer_files.push(libfuzzer_file);
+         FileHelper { crate_name, test_dir, test_files, reproduce_files, libfuzzer_files }
+     }
+ 

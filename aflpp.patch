@@ -1,0 +1,281 @@
+diff --git a/include/afl-fuzz.h b/include/afl-fuzz.h
+index edef9207..331df055 100644
+--- a/include/afl-fuzz.h
++++ b/include/afl-fuzz.h
+@@ -1128,6 +1128,7 @@ int  statsd_format_metric(afl_state_t *afl, char *buff, size_t bufflen);
+ /* Run */
+ 
+ void sync_fuzzers(afl_state_t *);
++int  query_model_is_useful(afl_state_t *afl, u8 *out_buf, u32 len);
+ u32  write_to_testcase(afl_state_t *, void **, u32, u32);
+ u8   calibrate_case(afl_state_t *, struct queue_entry *, u8 *, u32, u8);
+ u8   trim_case(afl_state_t *, struct queue_entry *, u8 *);
+diff --git a/qemu_mode/qemuafl b/qemu_mode/qemuafl
+--- a/qemu_mode/qemuafl
++++ b/qemu_mode/qemuafl
+@@ -1 +1 @@
+-Subproject commit a8af9cbde71e333ce72a46f15e655d0b82ed0939
++Subproject commit a8af9cbde71e333ce72a46f15e655d0b82ed0939-dirty
+diff --git a/src/afl-fuzz-bitmap.c b/src/afl-fuzz-bitmap.c
+index 485b82db..96a57631 100644
+--- a/src/afl-fuzz-bitmap.c
++++ b/src/afl-fuzz-bitmap.c
+@@ -512,75 +512,61 @@ save_if_interesting(afl_state_t *afl, void *mem, u32 len, u8 fault) {
+     if (unlikely(fd < 0)) { PFATAL("Unable to create '%s'", queue_fn); }
+     ck_write(fd, mem, len, queue_fn);
+     close(fd);
+-    add_to_queue(afl, queue_fn, len, 0);
++    int useful = query_model_is_useful(afl, mem, len);
++    if(useful) {
++      add_to_queue(afl, queue_fn, len, 0);
+ 
+ #ifdef INTROSPECTION
+-    if (afl->custom_mutators_count && afl->current_custom_fuzz) {
+-
+-      LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+-
+-        if (afl->current_custom_fuzz == el && el->afl_custom_introspection) {
+-
+-          const char *ptr = el->afl_custom_introspection(el->data);
+-
+-          if (ptr != NULL && *ptr != 0) {
+-
+-            fprintf(afl->introspection_file, "QUEUE CUSTOM %s = %s\n", ptr,
+-                    afl->queue_top->fname);
++      if (afl->custom_mutators_count && afl->current_custom_fuzz) {
++        LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
++          if (afl->current_custom_fuzz == el && el->afl_custom_introspection) {
++            const char *ptr = el->afl_custom_introspection(el->data);
+ 
++            if (ptr != NULL && *ptr != 0) {
++              fprintf(afl->introspection_file, "QUEUE CUSTOM %s = %s\n", ptr,
++                      afl->queue_top->fname);
++            }
+           }
++        });
+ 
+-        }
+-
+-      });
+-
+-    } else if (afl->mutation[0] != 0) {
+-
+-      fprintf(afl->introspection_file, "QUEUE %s = %s\n", afl->mutation,
+-              afl->queue_top->fname);
+-
+-    }
++      } else if (afl->mutation[0] != 0) {
++        fprintf(afl->introspection_file, "QUEUE %s = %s\n", afl->mutation,
++                afl->queue_top->fname);
++      }
+ 
+ #endif
+ 
+-    if (new_bits == 2) {
+-
+-      afl->queue_top->has_new_cov = 1;
+-      ++afl->queued_with_cov;
+-
+-    }
+-
+-    /* AFLFast schedule? update the new queue entry */
+-    if (cksum) {
+-
+-      afl->queue_top->n_fuzz_entry = cksum % N_FUZZ_SIZE;
+-      afl->n_fuzz[afl->queue_top->n_fuzz_entry] = 1;
+-
+-    }
+-
+-    /* due to classify counts we have to recalculate the checksum */
+-    afl->queue_top->exec_cksum =
+-        hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
++      if (new_bits == 2) {
++        afl->queue_top->has_new_cov = 1;
++        ++afl->queued_with_cov;
++      }
+ 
+-    /* Try to calibrate inline; this also calls update_bitmap_score() when
+-       successful. */
++      /* AFLFast schedule? update the new queue entry */
++      if (cksum) {
++        afl->queue_top->n_fuzz_entry = cksum % N_FUZZ_SIZE;
++        afl->n_fuzz[afl->queue_top->n_fuzz_entry] = 1;
++      }
+ 
+-    res = calibrate_case(afl, afl->queue_top, mem, afl->queue_cycle - 1, 0);
++      /* due to classify counts we have to recalculate the checksum */
++      afl->queue_top->exec_cksum =
++          hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
+ 
+-    if (unlikely(res == FSRV_RUN_ERROR)) {
++      /* Try to calibrate inline; this also calls update_bitmap_score() when
++         successful. */
+ 
+-      FATAL("Unable to execute target application");
++      res = calibrate_case(afl, afl->queue_top, mem, afl->queue_cycle - 1, 0);
+ 
+-    }
+-
+-    if (likely(afl->q_testcase_max_cache_size)) {
++      if (unlikely(res == FSRV_RUN_ERROR)) {
++        FATAL("Unable to execute target application");
++      }
+ 
+-      queue_testcase_store_mem(afl, afl->queue_top, mem);
++      if (likely(afl->q_testcase_max_cache_size)) {
++        queue_testcase_store_mem(afl, afl->queue_top, mem);
++      }
+ 
++      keeping = 1;
+     }
+ 
+-    keeping = 1;
+-
+   }
+ 
+   switch (fault) {
+diff --git a/src/afl-fuzz-run.c b/src/afl-fuzz-run.c
+index 7dd83150..5eda41e1 100644
+--- a/src/afl-fuzz-run.c
++++ b/src/afl-fuzz-run.c
+@@ -1031,7 +1031,7 @@ u8 __attribute__((hot))
+ common_fuzz_stuff(afl_state_t *afl, u8 *out_buf, u32 len) {
+ 
+   u8 fault;
+-
++  //if(!query_model_is_useful(afl, out_buf, len)) { return 0; }
+   if (unlikely(len = write_to_testcase(afl, (void **)&out_buf, len, 0)) == 0) {
+ 
+     return 0;
+diff --git a/src/afl-fuzz.c b/src/afl-fuzz.c
+index 138df26c..72f95e02 100644
+--- a/src/afl-fuzz.c
++++ b/src/afl-fuzz.c
+@@ -28,6 +28,7 @@
+ #include "common.h"
+ #include <limits.h>
+ #include <stdlib.h>
++#include <Python.h>
+ #ifndef USEMMAP
+   #include <sys/mman.h>
+   #include <sys/stat.h>
+@@ -45,6 +46,13 @@
+ extern u64 time_spent_working;
+ #endif
+ 
++static PyObject *pName,
++    *pModule,
++    *pDict,
++    *pFuncIsUseful,
++    *pIsUseful,
++    *pArgs;
++
+ static void at_exit() {
+ 
+   s32   i, pid1 = 0, pid2 = 0, pgrp = -1;
+@@ -499,6 +507,57 @@ fail:
+ 
+ int main(int argc, char **argv_orig, char **envp) {
+ 
++  Py_Initialize();
++
++  PyObject *sys = PyImport_ImportModule("sys");
++  PyObject *path = PyObject_GetAttrString(sys, "path");
++  PyList_Append(path, PyUnicode_FromString("."));
++
++  // Build name object
++  pName = PyUnicode_FromString("augmented");
++  if (!pName)
++  {
++    PyErr_Print();
++    printf("ERROR in pName\n");
++    exit(1);
++  }
++
++  // Load module object
++  pModule = PyImport_Import(pName);
++  if (!pModule)
++  {
++    PyErr_Print();
++    printf("ERROR in pModule\n");
++    exit(1);
++  }
++
++  // pDict is a borrowed reference
++  pDict = PyModule_GetDict(pModule);
++  if (!pDict)
++  {
++    PyErr_Print();
++    printf("ERROR in pDict\n");
++    exit(1);
++  }
++
++  /* pFuncQueryModel
++  pFuncQueryModel = PyDict_GetItemString(pDict, "query_model");
++  if (!pFuncQueryModel)
++  {
++    PyErr_Print();
++    printf("ERROR in pFuncQueryModel\n");
++    exit(1);
++  }*/
++
++  // pFuncIsUseful
++  pFuncIsUseful = PyDict_GetItemString(pDict, "is_useful");
++  if (!pFuncIsUseful)
++  {
++    PyErr_Print();
++    printf("ERROR in pFuncIsUseful\n");
++    exit(1);
++  }
++
+   s32 opt, auto_sync = 0 /*, user_set_cache = 0*/;
+   u64 prev_queued = 0;
+   u32 sync_interval_cnt = 0, seek_to = 0, show_help = 0, default_output = 1,
+@@ -2746,11 +2805,47 @@ stop_fuzzing:
+ 
+   alloc_report();
+ 
++  // Clean up
++  Py_DECREF(pIsUseful);
++  Py_DECREF(pFuncIsUseful);
++  Py_DECREF(pModule);
++  Py_DECREF(pName);
++  Py_DECREF(pArgs);
++
++  // Finish the Python Interpreter
++  Py_Finalize();
++
+   OKF("We're done here. Have a nice day!\n");
+ 
+   exit(0);
+ 
+ }
+ 
++int query_model_is_useful(afl_state_t *afl, u8 *out_buf, u32 len) {
++  //MY CHANGES
++  if (PyCallable_Check(pFuncIsUseful))
++  {
++    pArgs = PyTuple_New(2);
++    PyTuple_SetItem(pArgs, 0, PyUnicode_FromFormat("%06u", afl->current_entry));
++    PyTuple_SetItem(pArgs, 1, PyByteArray_FromStringAndSize((const char*) out_buf, len));
++
++    pIsUseful = PyObject_CallObject(pFuncIsUseful, pArgs);
++
++    if (pIsUseful != NULL)
++    {
++      if (PyObject_Not(pIsUseful)) return 0;
++    } else
++    {
++      PyErr_Print();
++    }
++  } else
++  {
++    PyErr_Print();
++  }
++  return 1;
++
++  // END CHANGES
++}
++
+ #endif                                                          /* !AFL_LIB */
+ 
